@@ -21,8 +21,6 @@ object Replicator {
 class Replicator(val replica: ActorRef) extends Actor {
 
   import Replicator._
-  import Replica._
-  import context.dispatcher
 
   /*
    * The contents of this actor is just a suggestion, you can implement it in any way you like.
@@ -43,15 +41,28 @@ class Replicator(val replica: ActorRef) extends Actor {
 
   /* TODO Behavior for the Replicator. */
   def receive: Receive = {
-    case replicate@Replicate(key, valueOption, id) => {
+    case msg@Replicate(key, valueOption, id) => {
       val seq = nextSeq
-      replica ! Snapshot(key, valueOption, seq)
-      acks = acks updated(seq, (sender, replicate))
+      acks = acks updated(seq, (sender, msg))
+
+      def replicate(): Unit = {
+        replica ! Snapshot(key, valueOption, seq)
+        context.system.scheduler.scheduleOnce(100.milliseconds) {
+          if (acks contains seq) {
+            replicate()
+          }
+        }(context.dispatcher)
+      }
+
+      replicate()
     }
 
     case SnapshotAck(key, seq) => {
       acks.get(seq).foreach {
-        case (sender, replicate) => sender ! Replicated(replicate.key, replicate.id)
+        case (sender, replicate) => {
+          sender ! Replicated(replicate.key, replicate.id)
+          acks = acks - seq
+        }
       }
     }
 
