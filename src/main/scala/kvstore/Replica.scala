@@ -2,7 +2,7 @@ package kvstore
 
 import akka.actor._
 import kvstore.Arbiter._
-import akka.actor.SupervisorStrategy.{Escalate}
+import akka.actor.SupervisorStrategy.Escalate
 import scala.concurrent.duration._
 import java.util.concurrent.TimeUnit
 import scala.Some
@@ -62,17 +62,19 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   val leader: Receive = {
     case Insert(key, value, id) => {
       kv = kv updated(key, value)
-      sender ! OperationAck(id)
+      persist(key, Some(value), id)
     }
 
     case Remove(key, id) => {
       kv = kv - key
-      sender ! OperationAck(id)
+      persist(key, None, id)
     }
 
     case Get(key, id) => {
       sender ! GetResult(key, kv.get(key), id)
     }
+
+    case UpdatePersisted(requester, _, _, id) => requester ! OperationAck(id) 
 
     case _ => ???
   }
@@ -82,8 +84,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
     case Snapshot(_, _, seq) if seq > expectedSeq => // Ignore
     case Snapshot(key, _, seq) if seq < expectedSeq => sender ! SnapshotAck(key, seq)
     case snapshot@Snapshot(key, valueOption, seq) => {
-      val replicator = sender
-      context.actorOf(Props(new Worker(replicator, snapshot)))
+      persist(key, valueOption, seq)
 
       valueOption match {
         case Some(value) => kv = kv updated(key, value)
@@ -95,18 +96,23 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
       sender ! GetResult(key, kv.get(key), id)
     }
 
-    case SnapshotPersisted(replicator: ActorRef, Snapshot(key, valueOption, seq)) =>
+    case UpdatePersisted(replicator, key, value, seq) =>
       replicator ! SnapshotAck(key, seq)
       context.become(replica(expectedSeq + 1))
 
     case _ => ???
   }
 
-  class Worker(replicator: ActorRef, snapshot: Snapshot) extends Actor {
+  private def persist(key: String, value: Option[String], id: Long): Unit = {
+    val requester = sender
+    context.actorOf(Props(new Worker(requester, key, value, id)))
+  }
+  
+  class Worker(requester: ActorRef, key: String, value: Option[String], id: Long) extends Actor {
 
     context.setReceiveTimeout(Duration(100, TimeUnit.MILLISECONDS))
 
-    override def supervisorStrategy: SupervisorStrategy = OneForOneStrategy() {
+    override def supervisorStrategy = OneForOneStrategy() {
       case _: PersistenceException => {
         Escalate
       }
@@ -114,12 +120,12 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
 
     override def preStart(): Unit = {
       val persistence = context.actorOf(persistenceProps)
-      persistence ! Persist(snapshot.key, snapshot.valueOption, snapshot.seq)
+      persistence ! Persist(key, value, id)
     }
 
     override def receive = {
-      case Persisted(snapshot.key, snapshot.seq) => {
-        context.parent ! SnapshotPersisted(replicator, snapshot)
+      case Persisted(`key`, `id`) => {
+        context.parent ! UpdatePersisted(requester, key, value, id)
         context.stop(self)
       }
 
@@ -131,6 +137,6 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
     }
   }
 
-  private case class SnapshotPersisted(replicator: ActorRef, snapshot: Snapshot)
+  private case class UpdatePersisted(requester: ActorRef, key: String, value: Option[String], id: Long)
 
 }

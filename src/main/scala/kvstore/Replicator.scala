@@ -29,7 +29,7 @@ class Replicator(val replica: ActorRef) extends Actor {
   // map from sequence number to pair of sender and request
   var acks = Map.empty[Long, (ActorRef, Replicate)]
   // a sequence of not-yet-sent snapshots (you can disregard this if not implementing batching)
-  var pending = Vector.empty[Snapshot]
+  var pending = Vector.empty[String]
 
   var _seqCounter = 0L
 
