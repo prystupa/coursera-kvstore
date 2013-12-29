@@ -110,6 +110,8 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   
   class Worker(requester: ActorRef, key: String, value: Option[String], id: Long) extends Actor {
 
+    var persistence: ActorRef = _
+
     context.setReceiveTimeout(Duration(100, TimeUnit.MILLISECONDS))
 
     override def supervisorStrategy = OneForOneStrategy() {
@@ -119,7 +121,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
     }
 
     override def preStart(): Unit = {
-      val persistence = context.actorOf(persistenceProps)
+      persistence = context.actorOf(persistenceProps)
       persistence ! Persist(key, value, id)
     }
 
@@ -130,7 +132,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
       }
 
       case ReceiveTimeout => {
-        throw new PersistenceException
+        persistence ! Persist(key, value, id)
       }
 
       case obj => ???
