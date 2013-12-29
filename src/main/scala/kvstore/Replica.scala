@@ -1,17 +1,12 @@
 package kvstore
 
-import akka.actor.{OneForOneStrategy, Props, ActorRef, Actor}
+import akka.actor._
 import kvstore.Arbiter._
-import scala.collection.immutable.Queue
-import akka.actor.SupervisorStrategy.Restart
-import scala.annotation.tailrec
-import akka.pattern.{ask, pipe}
-import akka.actor.Terminated
+import akka.actor.SupervisorStrategy.{Escalate}
 import scala.concurrent.duration._
-import akka.actor.PoisonPill
+import java.util.concurrent.TimeUnit
+import scala.Some
 import akka.actor.OneForOneStrategy
-import akka.actor.SupervisorStrategy
-import akka.util.Timeout
 
 object Replica {
 
@@ -43,7 +38,6 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   import Replica._
   import Replicator._
   import Persistence._
-  import context.dispatcher
 
   /*
    * The contents of this actor is just a suggestion, you can implement it in any way you like.
@@ -87,19 +81,56 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   def replica(expectedSeq: Long): Receive = {
     case Snapshot(_, _, seq) if seq > expectedSeq => // Ignore
     case Snapshot(key, _, seq) if seq < expectedSeq => sender ! SnapshotAck(key, seq)
-    case Snapshot(key, valueOption, seq) =>
+    case snapshot@Snapshot(key, valueOption, seq) => {
+      val replicator = sender
+      context.actorOf(Props(new Worker(replicator, snapshot)))
+
       valueOption match {
         case Some(value) => kv = kv updated(key, value)
         case None => kv = kv - key
       }
-      sender ! SnapshotAck(key, seq)
-      context.become(replica(expectedSeq + 1))
+    }
 
     case Get(key, id) => {
       sender ! GetResult(key, kv.get(key), id)
     }
 
+    case SnapshotPersisted(replicator: ActorRef, Snapshot(key, valueOption, seq)) =>
+      replicator ! SnapshotAck(key, seq)
+      context.become(replica(expectedSeq + 1))
+
     case _ => ???
   }
+
+  class Worker(replicator: ActorRef, snapshot: Snapshot) extends Actor {
+
+    context.setReceiveTimeout(Duration(100, TimeUnit.MILLISECONDS))
+
+    override def supervisorStrategy: SupervisorStrategy = OneForOneStrategy() {
+      case _: PersistenceException => {
+        Escalate
+      }
+    }
+
+    override def preStart(): Unit = {
+      val persistence = context.actorOf(persistenceProps)
+      persistence ! Persist(snapshot.key, snapshot.valueOption, snapshot.seq)
+    }
+
+    override def receive = {
+      case Persisted(snapshot.key, snapshot.seq) => {
+        context.parent ! SnapshotPersisted(replicator, snapshot)
+        context.stop(self)
+      }
+
+      case ReceiveTimeout => {
+        throw new PersistenceException
+      }
+
+      case obj => ???
+    }
+  }
+
+  private case class SnapshotPersisted(replicator: ActorRef, snapshot: Snapshot)
 
 }
